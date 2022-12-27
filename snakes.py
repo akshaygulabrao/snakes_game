@@ -1,185 +1,153 @@
-# Simple Snake Game in Python 3 for Beginners
-# By @TokyoEdTech
-
-import turtle
-import time
+import gymnasium as gym
+import math
 import random
+import matplotlib
+import matplotlib.pyplot as plt
+from collections import namedtuple,deque
+from itertools import count
 
-delay = 0.1
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
 
-# Score
-score = 0
-high_score = 0
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Set up the screen
-wn = turtle.Screen()
-wn.title("Snake Game by @TokyoEdTech")
-wn.bgcolor("green")
-wn.setup(width=600, height=600)
-wn.tracer(0) # Turns off the screen updates
+Transition = namedtuple('Transition', ('state','action','next_state','reward'))
 
-# Snake head
-head = turtle.Turtle()
-head.speed(0)
-head.shape("square")
-head.color("black")
-head.penup()
-head.goto(0,0)
-head.direction = "stop"
+class ReplayMemory(object):
+    def __init__(self,capacity):
+        self.memory = deque([],maxlen=capacity)
+    def push(self,*args):
+        self.memory.append(Transition(*args))
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+    def __len__(self):
+        return len(self.memory)
 
-# Snake food
-food = turtle.Turtle()
-food.speed(0)
-food.shape("circle")
-food.color("red")
-food.penup()
-food.goto(0,100)
+class DQN(nn.Module):
+    def __init__(self, n_observations, n_actions):
+        super(DQN, self).__init__()
+        self.layer1 = nn.Linear(n_observations, 128)
+        self.layer2 = nn.Linear(128,128)
+        self.layer3 = nn.Linear(128, n_actions)
 
-segments = []
+    def forward(self,x):
+        x = F.relu(self.layer1(x))
+        x = F.relu(self.layer2(x))
+        return self.layer3(x)
 
-# Pen
-pen = turtle.Turtle()
-pen.speed(0)
-pen.shape("square")
-pen.color("white")
-pen.penup()
-pen.hideturtle()
-pen.goto(0, 260)
-pen.write("Score: 0  High Score: 0", align="center", font=("Courier", 24, "normal"))
+def plot_durations(episode_durations, show_result=False):
+    plt.figure(1)
+    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    if show_result:
+        plt.title('Result')
+        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        print(means.numpy())
+    else:
+        plt.clf()
+        plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.plot(durations_t.numpy())
+    # Take 100 episode averages and plot them too
+    if len(durations_t) >= 100:
+        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
 
-# Functions
-def go_up():
-    if head.direction != "down":
-        head.direction = "up"
+    plt.pause(0.001)  # pause a bit so that plots are updated
 
-def go_down():
-    if head.direction != "up":
-        head.direction = "down"
+# env = gym.make("LunarLander-v2", render_mode="human")
+env = gym.make("CartPole-v1")
 
-def go_left():
-    if head.direction != "right":
-        head.direction = "left"
+state, info = env.reset()
+steps_done = 0
 
-def go_right():
-    if head.direction != "left":
-        head.direction = "right"
 
-def move():
-    if head.direction == "up":
-        y = head.ycor()
-        head.sety(y + 20)
+policy_net = DQN(env.observation_space.shape[0], env.action_space.n).to(device)
+target_net = DQN(env.observation_space.shape[0], env.action_space.n).to(device)
+try:
+    policy_net = torch.load('policy.pt')
+    target_net = torch.load('target.pt')
+except: pass
+target_net.load_state_dict(policy_net.state_dict())
 
-    if head.direction == "down":
-        y = head.ycor()
-        head.sety(y - 20)
+LR = 1e-4
+optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
+memory = ReplayMemory(10000)
+episode_durations = []
 
-    if head.direction == "left":
-        x = head.xcor()
-        head.setx(x - 20)
-
-    if head.direction == "right":
-        x = head.xcor()
-        head.setx(x + 20)
-
-# Keyboard bindings
-wn.listen()
-wn.onkeypress(go_up, "w")
-wn.onkeypress(go_down, "s")
-wn.onkeypress(go_left, "a")
-wn.onkeypress(go_right, "d")
-
-# Main game loop
-while True:
-    wn.update()
-
-    # Check for a collision with the border
-    if head.xcor()>290 or head.xcor()<-290 or head.ycor()>290 or head.ycor()<-290:
-        time.sleep(1)
-        head.goto(0,0)
-        head.direction = "stop"
-
-        # Hide the segments
-        for segment in segments:
-            segment.goto(1000, 1000)
+for _ in range(1000):
+    print(_)
+    sample = random.random()
+    EPS_START = 0.15
+    EPS_END = 0
+    EPS_DECAY = 900
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+    math.exp(-1. * steps_done / EPS_DECAY)
+    steps_done +=1
+    state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+    for t in count():
+        if sample > eps_threshold:
+            with torch.no_grad():
+                action = policy_net(state).max(1)[1].view(1, 1)
+        else:
+            action =  torch.tensor([[env.action_space.sample()]],device=device, dtype=torch.long)
+        observation, reward, terminated, truncated, info = env.step(int(action))
+        reward = torch.tensor([reward], device=device)
+        done = terminated or truncated
+        if terminated:
+            next_state = None
+        else:
+            next_state = torch.tensor(observation,dtype=torch.float32, device=device).unsqueeze(0)
+        memory.push(state,action,next_state,reward)
+        state = next_state
+        BATCH_SIZE = 128
+        GAMMA = 0.99
+        if len(memory) >= BATCH_SIZE:
+            transitions = memory.sample(BATCH_SIZE)
+            batch = Transition(*zip(*transitions))
+            non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                batch.next_state)), device=device, dtype=torch.bool)
+            non_final_next_states = torch.cat([s for s in batch.next_state
+                if s is not None])
+            state_batch = torch.cat(batch.state)
+            action_batch = torch.cat(batch.action)
+            reward_batch = torch.cat(batch.reward)
+            state_action_values = policy_net(state_batch).gather(1, action_batch)
+            next_state_values = torch.zeros(BATCH_SIZE,device=device)
+            with torch.no_grad():
+                next_state_values[non_final_mask] = next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
+            expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+            criterion = nn.SmoothL1Loss()
+            loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+            optimizer.zero_grad()
+            loss.backward()
+            # In-place gradient clipping
+            torch.nn.utils.clip_grad_value_(policy_net.parameters(), 100)
+            optimizer.step()
+        TAU = 0.005
+        target_net_state_dict = target_net.state_dict()
+        policy_net_state_dict = policy_net.state_dict()
+        for key in policy_net_state_dict:
+            target_net_state_dict[key] = policy_net_state_dict[key]*TAU + target_net_state_dict[key]*(1-TAU)
+        target_net.load_state_dict(target_net_state_dict)
         
-        # Clear the segments list
-        segments.clear()
+        if done:
+            episode_durations.append(t+1)
+            # plot_durations(episode_durations)
+            break
 
-        # Reset the score
-        score = 0
+    if terminated or truncated:
+        state, info = env.reset()
 
-        # Reset the delay
-        delay = 0.1
+print('Complete')
+torch.save(policy_net,'policy.pt')
+torch.save(target_net,'target.pt')
 
-        pen.clear()
-        pen.write("Score: {}  High Score: {}".format(score, high_score), align="center", font=("Courier", 24, "normal")) 
-
-
-    # Check for a collision with the food
-    if head.distance(food) < 20:
-        # Move the food to a random spot
-        x = random.randint(-290, 290)
-        y = random.randint(-290, 290)
-        food.goto(x,y)
-
-        # Add a segment
-        new_segment = turtle.Turtle()
-        new_segment.speed(0)
-        new_segment.shape("square")
-        new_segment.color("grey")
-        new_segment.penup()
-        segments.append(new_segment)
-
-        # Shorten the delay
-        delay -= 0.001
-
-        # Increase the score
-        score += 10
-
-        if score > high_score:
-            high_score = score
-        
-        pen.clear()
-        pen.write("Score: {}  High Score: {}".format(score, high_score), align="center", font=("Courier", 24, "normal")) 
-
-    # Move the end segments first in reverse order
-    for index in range(len(segments)-1, 0, -1):
-        x = segments[index-1].xcor()
-        y = segments[index-1].ycor()
-        segments[index].goto(x, y)
-
-    # Move segment 0 to where the head is
-    if len(segments) > 0:
-        x = head.xcor()
-        y = head.ycor()
-        segments[0].goto(x,y)
-
-    move()    
-
-    # Check for head collision with the body segments
-    for segment in segments:
-        if segment.distance(head) < 20:
-            time.sleep(1)
-            head.goto(0,0)
-            head.direction = "stop"
-        
-            # Hide the segments
-            for segment in segments:
-                segment.goto(1000, 1000)
-        
-            # Clear the segments list
-            segments.clear()
-
-            # Reset the score
-            score = 0
-
-            # Reset the delay
-            delay = 0.1
-        
-            # Update the score display
-            pen.clear()
-            pen.write("Score: {}  High Score: {}".format(score, high_score), align="center", font=("Courier", 24, "normal"))
-
-    time.sleep(delay)
-
-wn.mainloop()
+plot_durations(episode_durations,show_result=True)
+plt.ioff()
+plt.show()
+env.close()
